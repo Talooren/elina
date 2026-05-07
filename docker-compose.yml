@@ -1,0 +1,21 @@
+services:
+  elina:
+    build: .
+    container_name: elina
+    restart: always
+    env_file: .env
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - elina_memory:/app/memory/data
+      - elina_logs:/app/logs
+    networks:
+      - elina_net
+
+volumes:
+  elina_memory:
+  elina_logs:
+
+networks:
+  elina_net:
+    driver: bridge
