@@ -29,8 +29,7 @@ from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 from anthropic import AsyncAnthropic
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiohttp_socks import ProxyConnector
-from eyes.generator import generate_photo
+from eyes.fal_generator import generate_photo
 from aiogram.types import BufferedInputFile
 from voice.elevenlabs_tts import ElevenLabsTTS
 from voice.voice_cache import VoiceCache
@@ -38,6 +37,8 @@ from voice.voice_counter import VoiceStreakCounter
 from voice.stt import DeepgramSTT
 # Загружаем переменные окружения
 load_dotenv()
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # =========================================================================
 # PHOTO TRIGGERS — запросы фото Элины
@@ -63,6 +64,8 @@ INTIMATE_PHOTO_TRIGGERS = [
     "nude photo", "naked", "topless", "sexy photo", "show boobs",
     "покажи тело", "своё тело", "покажи всё", "хочу видеть тебя голой",
     "18+", "для взрослых",
+    "в белье", "в бельё", "нижнее бельё", "нижнем белье", "нижнем бельё",
+    "в нижнем", "в купальнике", "в бикини", "в стрингах",
 ]
 
 # Триггеры explicit-контента — словарь {scene_type: [фразы]}
@@ -139,6 +142,9 @@ EXPLICIT_PHOTO_TRIGGERS: dict = {
     ],
 }
 
+# Счётчик последовательных голосовых запросов (per user_id)
+_voice_req_streak: dict = {}
+
 def _prepare_tts(text: str) -> str:
     """Подготовка текста для TTS: паузы и ударения."""
     import re
@@ -152,27 +158,96 @@ def _prepare_tts(text: str) -> str:
     return text
 
 
+
+
+
+# Root-матчинг: каждый элемент — пара корней, оба должны присутствовать в тексте.
+# Покрывает падежи, спряжения, вставные слова ("себе", "туда" и т.п.)
+_EXPLICIT_ROOT_TRIGGERS: dict = {
+    "anal_finger": [
+        ("палец", "поп"), ("палец", "жоп"), ("палец", "анус"), ("палец", "анал"),
+        ("пальц", "поп"), ("пальц", "жоп"), ("пальц", "анус"),
+        ("засов", "поп"), ("засов", "жоп"), ("засов", "анус"),
+        ("сунь", "поп"), ("суну", "поп"), ("сунул", "поп"),
+        ("вставь", "поп"), ("вставь", "анус"),
+        ("finger", "ass"), ("finger", "anus"), ("finger", "anal"),
+    ],
+    "masturbation": [
+        ("палец", "вагин"), ("палец", "пизд"), ("палец", "киск"),
+        ("пальц", "вагин"), ("пальц", "пизд"),
+        ("засов", "вагин"), ("засов", "пизд"),
+        ("трогай", "пизд"), ("ласкай", "пизд"), ("ласкай", "вагин"),
+        ("теребит", "клитор"), ("трёт", "клитор"),
+        ("finger", "pussy"), ("finger", "vagina"),
+    ],
+    "dildo_anal": [
+        ("дилдо", "поп"), ("дилдо", "анус"), ("дилдо", "жоп"),
+        ("самотык", "поп"), ("самотык", "анус"),
+        ("вибратор", "поп"), ("вибратор", "анус"),
+        ("игрушк", "поп"), ("игрушк", "анус"),
+        ("dildo", "ass"), ("dildo", "anal"),
+    ],
+    "dildo_vaginal": [
+        ("дилдо", "вагин"), ("дилдо", "пизд"), ("дилдо", "киск"),
+        ("самотык", "вагин"), ("самотык", "пизд"),
+        ("вибратор", "вагин"), ("вибратор", "пизд"),
+        ("dildo", "pussy"), ("dildo", "vagina"),
+    ],
+    "anus_spread": [
+        ("раздвин", "поп"), ("раздвин", "жоп"), ("раздвин", "ягодиц"),
+        ("покажи", "анус"), ("покажи", "дырочк"),
+        ("spread", "ass"), ("show", "anus"),
+    ],
+    "wet_vagina": [
+        ("мокра", "вагин"), ("мокра", "пизд"), ("мокра", "киск"),
+        ("влажн", "вагин"), ("влажн", "пизд"),
+        ("wet", "pussy"), ("wet", "vagina"),
+    ],
+    "shower": [
+        ("душ", "вагин"), ("душ", "пизд"), ("вода", "вагин"), ("вода", "пизд"),
+        ("shower", "pussy"), ("shower", "vagina"),
+    ],
+}
+
+
 def detect_explicit_scene(text: str):
-    """Возвращает scene_type если текст совпадает с explicit-триггером, иначе None."""
     text_lower = text.lower()
     for scene_type, triggers in EXPLICIT_PHOTO_TRIGGERS.items():
         if any(t in text_lower for t in triggers):
             return scene_type
+    # Fallback: root-матчинг (покрывает падежи и вставные слова)
+    for scene_type, root_pairs in _EXPLICIT_ROOT_TRIGGERS.items():
+        for r1, r2 in root_pairs:
+            if r1 in text_lower and r2 in text_lower:
+                return scene_type
     return None
 
 
-async def handle_photo_request(user_id: int, bot, trust_level: int = 0, scene_type: str = None) -> None:
+async def handle_photo_request(user_id: int, bot, trust_level: int = 0, scene_type: str = None, user_text: str = None) -> None:
     """Обработчик запроса фото — с учётом уровня доверия и типа сцены"""
-    from eyes.generator import generate_photo as _gen_photo
+    from eyes.fal_generator import generate_photo as _gen_photo
     await asyncio.sleep(random.uniform(5, 15))
     await bot.send_chat_action(user_id, "upload_photo")
     await asyncio.sleep(random.uniform(3, 7))
     try:
         hour = datetime.now(ELINA_TZ).hour
-        photo_url = await _gen_photo(trust_level=trust_level, hour=hour, scene_type=scene_type)
-        await bot.send_photo(user_id, photo_url)
+        photo_url = await _gen_photo(trust_level=trust_level, hour=hour, scene_type=scene_type, user_text=user_text)
+        if photo_url is None:
+            _fail = random.choice([
+                "извини, сейчас не могу.. попозже, ладно?",
+                "ой, что-то не получается сфоткаться.. чуть позже скину, ок?",
+                "блин, камера тупит.. скину попозже",
+                "сейчас не могу, потом покажу, хорошо?",
+            ])
+            await bot.send_message(user_id, _fail)
+            return
+        async with aiohttp.ClientSession() as _sess:
+            async with _sess.get(photo_url, timeout=aiohttp.ClientTimeout(total=60)) as _resp:
+                _data = await _resp.read()
+        await bot.send_photo(user_id, BufferedInputFile(_data, filename="photo.jpg"))
     except Exception as e:
         print(f"Photo request error: {e}")
+        await bot.send_message(user_id, "что-то пошло не так.. попробуй чуть позже")
 
 ELINA_TZ = pytz.timezone('Europe/Kaliningrad')
 ELINA_MSK_TZ = pytz.timezone('Europe/Moscow')
@@ -223,6 +298,42 @@ def _elina_state(hour: int, forced_awake: bool = False) -> tuple[str, str, str]:
 # КОНФИГУРАЦИЯ
 # =============================================================================
 
+
+# ============================================================
+# REGEX FACT EXTRACTOR (0 tokens)
+# ============================================================
+
+def extract_user_facts(text: str) -> list:
+    # Extract user facts via regex. No LLM calls.
+    results = []
+    t = text.strip()
+    patterns = [
+        (r'меня зовут ([\w\-]+)', 'имя'),
+        (r'моё имя ([\w\-]+)', 'имя'),
+        (r'мне (\d+) лет', 'возраст'),
+        (r'мне (\d+)\s*год', 'возраст'),
+        (r'я работаю ([\w\s]+?)(?:\.|,|$)', 'работа'),
+        (r'я по профессии ([\w\s]+?)(?:\.|,|$)', 'работа'),
+        (r'я ([\w\s]+?) по профессии', 'работа'),
+        (r'моя профессия ([\w\s]+?)(?:\.|,|$)', 'работа'),
+        (r'у меня есть (сын|дочь|кот|кошка|собака|жена|муж|дочка|ребёнок|ребенок)([\w\s,]*?)(?:\.|$)', 'семья'),
+        (r'я люблю ([\w\s]+?)(?:\.|,|$)', 'нравится'),
+        (r'мне нравится ([\w\s]+?)(?:\.|,|$)', 'нравится'),
+        (r'обожаю ([\w\s]+?)(?:\.|,|$)', 'нравится'),
+        (r'я не люблю ([\w\s]+?)(?:\.|,|$)', 'не нравится'),
+        (r'ненавижу ([\w\s]+?)(?:\.|,|$)', 'не нравится'),
+        (r'мне не нравится ([\w\s]+?)(?:\.|,|$)', 'не нравится'),
+        (r'я живу в ([\w\s\-]+?)(?:\.|,|$)', 'город'),
+        (r'я из ([\w\s\-]+?)(?:\.|,|$)', 'город'),
+    ]
+    for pattern, fact_type in patterns:
+        m = re.search(pattern, t, re.IGNORECASE)
+        if m:
+            content = m.group(1).strip()
+            if 0 < len(content) < 80:
+                results.append((fact_type, content))
+    return results
+
 class Config:
     """Конфигурация Brain модуля"""
     
@@ -241,7 +352,7 @@ class Config:
     DB_PATH = BASE_DIR / "memory" / "data" / "memory.db"
     
     # Поведение
-    MAX_CONTEXT_MESSAGES = 20
+    MAX_CONTEXT_MESSAGES = 40
     RESPONSE_DELAY_MIN = 30
     RESPONSE_DELAY_MAX = 90
     
@@ -564,8 +675,7 @@ class ElinaBot:
     def __init__(self):
         proxy_url = os.getenv("TELEGRAM_PROXY")
         if proxy_url and proxy_url.strip():
-            connector = ProxyConnector.from_url(proxy_url)
-            session = AiohttpSession(connector=connector)
+            session = AiohttpSession(proxy=proxy_url)
             self.bot = Bot(token=config.TELEGRAM_BOT_TOKEN, session=session)
         else:
             self.bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
@@ -808,20 +918,68 @@ class ElinaBot:
                 # --- Запрос фото ---
                 _scene_type = detect_explicit_scene(msg_text)
                 _is_intimate = any(trigger in msg_text for trigger in INTIMATE_PHOTO_TRIGGERS)
-                _is_photo = any(trigger in msg_text for trigger in PHOTO_TRIGGERS)
+                # Раздельная проверка: глагол-отправки + слово фото
+                _SEND_VERBS = {
+                    'пришли', 'отправь', 'покажи', 'скинь', 'давай', 'покажись',
+                    'хочу', 'жду', 'send', 'show',
+                }
+                _PHOTO_WORDS = {'фото', 'фотку', 'фотографию', 'selfi', 'селфи', 'photo', 'pic'}
+                _words = set(msg_text.split())
+                _is_photo = (
+                    any(trigger in msg_text for trigger in PHOTO_TRIGGERS)
+                    or (_SEND_VERBS & _words and _PHOTO_WORDS & _words)
+                    or any(w in msg_text for w in _PHOTO_WORDS)
+                    and any(v in msg_text for v in _SEND_VERBS)
+                )
                 if _scene_type or _is_intimate or _is_photo:
                     self._processing_users.discard(message.from_user.id)
                     _trust = self._trust_for(user_id)
+                    effective_trust = None
+                    _refusal = None
+
                     if _scene_type:
-                        effective_trust = 6
+                        # Explicit запрос — требует trust >= 5
+                        if _trust >= 5:
+                            effective_trust = 6
+                        else:
+                            _refusal = random.choice([
+                                "Мы ещё недостаточно близки для этого...",
+                                "Не думаю, что мы дошли до такого уровня доверия 🙂",
+                                "Нет, это слишком.",
+                            ])
                     elif _is_intimate:
-                        effective_trust = 5
+                        # Intimate запрос — требует trust >= 4
+                        if _trust >= 4:
+                            effective_trust = min(_trust, 5)
+                        else:
+                            _refusal = random.choice([
+                                "Мы ещё не настолько близки для таких фото 🙂",
+                                "Нет, пока не готова к этому...",
+                                "Слишком рано для такого.",
+                            ])
                     else:
-                        effective_trust = _trust
+                        # Обычный фото-запрос — всегда разрешён, cap trust 3
+                        effective_trust = min(_trust, 3)
+
+                    if _refusal is not None:
+                        await message.answer(_refusal)
+                        return
+
+                    # Groq classify — только для intimate/explicit (effective_trust >= 4)
+                    if not _scene_type and effective_trust >= 4 and GROQ_API_KEY:
+                        from eyes.fal_generator import classify_scene_groq as _classify
+                        _g_scene = await _classify(incoming_text)
+                        print(f"[agent] Groq classify result: {_g_scene}")
+                        if _g_scene and _g_scene not in ("intimate", "sfw", None):
+                            _scene_type = _g_scene
+                            effective_trust = 6
+
+                    print(f"[agent] photo request: scene={_scene_type} trust={_trust} effective={effective_trust}")
                     await handle_photo_request(
                         message.from_user.id, self.bot,
                         trust_level=effective_trust,
                         scene_type=_scene_type,
+                        user_text=incoming_text,
                     )
                     return
                 if any(word in msg_text for word in ["привет", "здравствуй", "хай"]):
@@ -981,6 +1139,11 @@ class ElinaBot:
                 # Сохраняем сообщение пользователя
                 self.memory.save_message(user_id, "user", incoming_text)
 
+                # Извлекаем факты (regex, 0 токенов)
+                for fact_type, content in extract_user_facts(incoming_text):
+                    self.memory.save_fact(user_id, fact_type, content)
+                    logger.info(f"Fact saved: [{fact_type}] {content}")
+
                 # Ждём (имитация набора)
                 await asyncio.sleep(delay)
 
@@ -994,6 +1157,18 @@ class ElinaBot:
                 # voice_mode: voice / text / switch (switch = streak exceeded)
                 voice_mode = self.voice_counter.get_reply_mode(message.from_user.id, is_voice)
 
+                # Стем-триггер голоса: "голос*" / "слыш*" → 70% первый, 90% повторно
+                import re as _re
+                if trust_level >= 1 and _re.search(r'голос|слыш', msg_text, _re.IGNORECASE):
+                    _vstreak = _voice_req_streak.get(user_id, 0) + 1
+                    _voice_req_streak[user_id] = _vstreak
+                    _vprob = 0.90 if _vstreak > 1 else 0.70
+                    if random.random() < _vprob:
+                        voice_mode = "voice"
+                        logger.info(f"Voice stem trigger (streak={_vstreak}, prob={_vprob:.0%})")
+                else:
+                    _voice_req_streak[user_id] = 0
+
                 extra_context = await self.enrich_with_knowledge(incoming_text, trust_level)
                 enriched_message = f"{incoming_text}\n{extra_context}" if extra_context else incoming_text
                 if voice_mode == "switch":
@@ -1004,6 +1179,14 @@ class ElinaBot:
                     )
                 # Генерируем ответ через Claude API
                 system_prompt = self.soul.get_system_prompt(trust_level, mood, forced_awake=forced_awake)
+
+                # Факты о пользователе -> в промпт (~50-100 токенов)
+                user_facts = self.memory.get_facts(user_id)
+                if user_facts:
+                    facts_str = "\n".join(f"- {ft}: {c}" for ft, c in user_facts)
+                    system_prompt += f"\n\nЧТО ЭЛИНА ЗНАЕТ О ПОЛЬЗОВАТЕЛЕ:\n{facts_str}"
+                    logger.info(f"Facts injected: {len(user_facts)} items")
+
                 response = await self.llm.generate_response(
                     system_prompt,
                     enriched_message,
@@ -1107,6 +1290,7 @@ class ElinaBot:
 
                     if msg:
                         # Проверяем непрочитанные сообщения от пользователя
+                        trust_level = self._trust_for(user_id)
                         unread = self.memory.get_unread_user_messages(user_id)
                         if unread:
                             # Есть непрочитанные — отвечаем на последнее вместо проактивного
@@ -1119,21 +1303,51 @@ class ElinaBot:
                                 reply = await self.llm.generate_response(system_prompt, last_unread, context)
                                 _, reply = self.validator.validate(reply, trust_level)
                                 parts = self.behavior.split_message(reply)
-                                for part in parts:
-                                    if part.strip():
-                                        await self.bot.send_message(int(telegram_id), part)
-                                        await asyncio.sleep(random.uniform(1, 3))
+                                # 30% шанс голосового если trust >= 1
+                                _use_voice_reply = (random.random() < 0.30 and trust_level >= 1)
+                                if _use_voice_reply:
+                                    _, _, _pmood = _elina_state(datetime.now(ELINA_MSK_TZ).hour)
+                                    _ptts = _prepare_tts(" ".join(p for p in parts if p.strip()))
+                                    _is_own = (OWNER_ID and int(telegram_id) == OWNER_ID)
+                                    _pcached = self.voice_cache.get(_ptts, mood=_pmood)
+                                    _pogg = _pcached or await self.tts.generate(_ptts, mood=_pmood, bypass_limit=_is_own)
+                                    if _pogg:
+                                        if not _pcached:
+                                            self.voice_cache.put(_ptts, _pogg, mood=_pmood)
+                                        await self.bot.send_voice(int(telegram_id), BufferedInputFile(_pogg, filename="voice.ogg"))
+                                    else:
+                                        _use_voice_reply = False
+                                if not _use_voice_reply:
+                                    for part in parts:
+                                        if part.strip():
+                                            await self.bot.send_message(int(telegram_id), part)
+                                            await asyncio.sleep(random.uniform(1, 3))
                                 self.memory.save_message(user_id, "assistant", reply)
                                 self._proactive_sent[user_id] = now
-                                print(f"Replied to unread from {telegram_id}: {repr(reply)}")
+                                print(f"Proactive reply {'voice' if _use_voice_reply else 'text'} to {telegram_id}: {repr(reply)}")
                             except Exception as e:
                                 print(f"Unread reply error {telegram_id}: {e}")
                         else:
                             try:
-                                await self.bot.send_message(int(telegram_id), msg)
+                                # 30% шанс голосового если trust >= 1
+                                _use_voice = (random.random() < 0.30 and trust_level >= 1)
+                                if _use_voice:
+                                    _, _, _pmood = _elina_state(datetime.now(ELINA_MSK_TZ).hour)
+                                    _ptts = _prepare_tts(msg)
+                                    _is_own = (OWNER_ID and int(telegram_id) == OWNER_ID)
+                                    _pcached = self.voice_cache.get(_ptts, mood=_pmood)
+                                    _pogg = _pcached or await self.tts.generate(_ptts, mood=_pmood, bypass_limit=_is_own)
+                                    if _pogg:
+                                        if not _pcached:
+                                            self.voice_cache.put(_ptts, _pogg, mood=_pmood)
+                                        await self.bot.send_voice(int(telegram_id), BufferedInputFile(_pogg, filename="voice.ogg"))
+                                    else:
+                                        _use_voice = False
+                                if not _use_voice:
+                                    await self.bot.send_message(int(telegram_id), msg)
                                 self.memory.save_message(user_id, "assistant", msg)
                                 self._proactive_sent[user_id] = now
-                                print(f"Proactive: sent to {telegram_id}: {msg}")
+                                print(f"Proactive {'voice' if _use_voice else 'text'}: sent to {telegram_id}: {msg}")
                             except Exception as e:
                                 print(f"Proactive send error {telegram_id}: {e}")
             except Exception as e:

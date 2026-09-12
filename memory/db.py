@@ -182,28 +182,67 @@ class MemoryDB:
         conn.close()
         return [r[0] for r in rows]
 
+    @staticmethod
+    def _norm_key(text: str) -> str:
+        import re
+        text = re.sub(r"[^\w\s]", " ", text.lower().strip())
+        return re.sub(r"\s+", " ", text).strip()[:80]
+
     def save_learned_fact(self, question_key: str, answer: str, source: str = "web"):
         """Сохранить выученный факт"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
             "INSERT OR REPLACE INTO learned_facts (question_key, answer, source) VALUES (?, ?, ?)",
-            (question_key, answer, source)
+            (self._norm_key(question_key), answer, source)
         )
         conn.commit()
         conn.close()
 
     def get_learned_fact(self, question_key: str):
-        """Получить выученный факт"""
+        """Получить выученный факт (нечёткий поиск по нормализованному ключу)"""
+        norm = self._norm_key(question_key)
+        prefix = norm[:40]
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT answer FROM learned_facts WHERE question_key = ?",
-            (question_key,)
+            "SELECT answer FROM learned_facts WHERE question_key LIKE ?",
+            (f"%{prefix}%",)
         )
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
+
+    # ── Задача 1: факты о пользователе ──────────────────────────────────────
+
+    def get_facts(self, user_id: int) -> List[Tuple[str, str]]:
+        """Получить все факты о пользователе"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT fact_type, content FROM facts WHERE user_id = ? ORDER BY id",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def save_fact(self, user_id: int, fact_type: str, content: str):
+        """Сохранить / обновить факт о пользователе"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE facts SET content = ?, created_at = ? "
+            "WHERE id = (SELECT id FROM facts WHERE user_id = ? AND fact_type = ? ORDER BY id DESC LIMIT 1)",
+            (content, datetime.now(), user_id, fact_type)
+        )
+        if cursor.rowcount == 0:
+            cursor.execute(
+                "INSERT INTO facts (user_id, fact_type, content) VALUES (?, ?, ?)",
+                (user_id, fact_type, content)
+            )
+        conn.commit()
+        conn.close()
 
     def get_recent_messages(self, user_id: int, limit: int = 20) -> List[Tuple[str, str]]:
         """Получить последние сообщения пользователя"""

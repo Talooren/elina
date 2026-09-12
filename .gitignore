@@ -9,6 +9,11 @@ secrets/
 *.pem
 *.key
 
+# --- Backup stubs (never commit) ---
+*.bak
+*.bak2
+*.before_*
+
 # --- Model weights & large binaries ---
 *.pth
 *.safetensors
@@ -35,6 +40,9 @@ secrets/
 *.jpeg
 *.gif
 *.webp
+
+# --- Eyes (images/references — excluded from portfolio) ---
+eyes/
 
 # --- Logs & runtime state ---
 logs/

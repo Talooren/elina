@@ -6,6 +6,7 @@ services:
     env_file: .env
     environment:
       - PYTHONPATH=/app
+      - TELEGRAM_PROXY=
     volumes:
       - elina_memory:/app/memory/data
       - elina_logs:/app/logs
